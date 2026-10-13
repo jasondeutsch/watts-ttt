@@ -1,3 +1,8 @@
-# Story evidence
+# Story Log
 
-Append DONE US-### only after the story's checks pass.
+DONE US-001
+DONE US-002
+DONE US-003
+DONE US-004
+DONE US-005
+DONE US-006

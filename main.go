@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -56,7 +57,14 @@ func render(b board, showNumbers bool) string {
 	return sb.String()
 }
 
+var addrFlag = flag.String("addr", "", "listen address for web mode (e.g., localhost:8080)")
+
 func main() {
+	flag.Parse()
+	if *addrFlag != "" {
+		startWebServer(*addrFlag)
+		return
+	}
 	os.Exit(playGame(bufio.NewScanner(os.Stdin), os.Stdout))
 }
 
