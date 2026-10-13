@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,96 +12,9 @@ import (
 )
 
 // setupServer creates a new server with a fresh game state for testing.
+// It exercises the exact production handlers via newServerMux.
 func setupServer() *httptest.Server {
-	gs := newGameState()
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("<html></html>"))
-	})
-
-	mux.HandleFunc("/state", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeJSON(w, http.StatusMethodNotAllowed, ErrorResponse{Error: "method not allowed"})
-			return
-		}
-		gs.mu.Lock()
-		resp := gs.toStateResponse()
-		gs.mu.Unlock()
-		writeJSON(w, http.StatusOK, resp)
-	})
-
-	mux.HandleFunc("/move", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeJSON(w, http.StatusMethodNotAllowed, ErrorResponse{Error: "method not allowed"})
-			return
-		}
-		var req moveRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid JSON body"})
-			return
-		}
-		if req.Cell == nil {
-			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "missing 'cell' field"})
-			return
-		}
-		cell := *req.Cell
-		gs.mu.Lock()
-		defer gs.mu.Unlock()
-		if gs.gameOver {
-			writeJSON(w, http.StatusBadRequest, gs.toStateResponse())
-			return
-		}
-		if cell < 0 || cell > 8 {
-			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: fmt.Sprintf("cell %d is out of range (0-8)", cell)})
-			return
-		}
-		if gs.board[cell] != empty {
-			writeJSON(w, http.StatusBadRequest, gs.toStateResponse())
-			return
-		}
-		gs.board[cell] = gs.currentPlayer
-		if winner, won := checkWin(gs.board); won {
-			gs.winner = winner
-			gs.gameOver = true
-			writeJSON(w, http.StatusOK, gs.toStateResponse())
-			return
-		}
-		if isDraw(gs.board) {
-			gs.gameOver = true
-			writeJSON(w, http.StatusOK, gs.toStateResponse())
-			return
-		}
-		if gs.currentPlayer == playerX {
-			gs.currentPlayer = playerO
-		} else {
-			gs.currentPlayer = playerX
-		}
-		writeJSON(w, http.StatusOK, gs.toStateResponse())
-	})
-
-	mux.HandleFunc("/reset", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeJSON(w, http.StatusMethodNotAllowed, ErrorResponse{Error: "method not allowed"})
-			return
-		}
-		gs.mu.Lock()
-		gs.board = newBoard()
-		gs.currentPlayer = playerX
-		gs.winner = 0
-		gs.gameOver = false
-		resp := gs.toStateResponse()
-		gs.mu.Unlock()
-		writeJSON(w, http.StatusOK, resp)
-	})
-
-	return httptest.NewServer(mux)
+	return httptest.NewServer(newServerMux(newGameState()))
 }
 
 func parseStateResponse(t *testing.T, body string) stateResponse {
@@ -513,6 +427,94 @@ func TestMove_AfterWin_MovesRejected(t *testing.T) {
 		resp, _ = makeMove(t, srv, cell)
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("expected 400 for move after win at cell %d, got %d", cell, resp.StatusCode)
+		}
+	}
+}
+
+func TestStyleCSS_ServedWithTextCSSContentType(t *testing.T) {
+	srv := setupServer()
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/style.css")
+	if err != nil {
+		t.Fatalf("GET /style.css failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	ctype := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(ctype, "text/css") {
+		t.Errorf("expected text/css content type, got %s", ctype)
+	}
+
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading /style.css body: %v", err)
+	}
+	want, err := embeddedFiles.ReadFile("style.css")
+	if err != nil {
+		t.Fatalf("reading embedded style.css: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Error("served /style.css bytes do not match the embedded style.css")
+	}
+}
+
+func TestStyleCSS_RejectsNonGet(t *testing.T) {
+	srv := setupServer()
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/style.css", "text/css", nil)
+	if err != nil {
+		t.Fatalf("POST /style.css failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 for POST /style.css, got %d", resp.StatusCode)
+	}
+}
+
+func TestHomePage_LinksStylesheetAndKeepsMarkup(t *testing.T) {
+	srv := setupServer()
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET / failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading / body: %v", err)
+	}
+	html := string(body)
+
+	if !strings.Contains(html, `<link rel="stylesheet" href="style.css">`) {
+		t.Error("served HTML does not link style.css")
+	}
+	if strings.Contains(html, "<style") {
+		t.Error("served HTML still contains an inline <style> block")
+	}
+
+	// The documented IDs/classes that the gameplay script and CSS depend on.
+	for _, expected := range []string{
+		`id="board"`,
+		`id="status"`,
+		`id="reset-btn"`,
+		`class="cell"`,
+		`classList.add('taken')`,
+		`mark === 'X' ? 'x' : 'o'`,
+		`classList.add('game-over')`,
+		`fetchState()`,
+	} {
+		if !strings.Contains(html, expected) {
+			t.Errorf("served HTML is missing %q (markup/script must stay intact)", expected)
 		}
 	}
 }

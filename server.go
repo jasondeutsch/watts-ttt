@@ -9,7 +9,7 @@ import (
 	"sync"
 )
 
-//go:embed index.html
+//go:embed index.html style.css
 var embeddedFiles embed.FS
 
 // gameState holds the authoritative game state, protected by a mutex.
@@ -74,25 +74,46 @@ func (gs *gameState) toStateResponse() stateResponse {
 	}
 }
 
-// startWebServer starts the HTTP server on the given address.
-func startWebServer(addr string) {
-	gs := newGameState()
+// serveEmbeddedFile returns a handler that serves a single embedded file
+// with the given Content-Type.
+func serveEmbeddedFile(name, contentType string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		data, err := embeddedFiles.ReadFile(name)
+		if err != nil {
+			log.Printf("error reading embedded %s: %v", name, err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", contentType)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+	}
+}
 
+// newServerMux builds the production HTTP mux for the given game state.
+// It exists as a factory so tests and the running server exercise identical
+// handlers.
+func newServerMux(gs *gameState) *http.ServeMux {
 	mux := http.NewServeMux()
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
 		}
-		data, err := embeddedFiles.ReadFile("index.html")
-		if err != nil {
-			log.Printf("error reading embedded index.html: %v", err)
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(data)
+		serveEmbeddedFile("index.html", "text/html; charset=utf-8")(w, r)
+	})
+
+	mux.HandleFunc("/style.css", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		serveEmbeddedFile("style.css", "text/css")(w, r)
 	})
 
 	mux.HandleFunc("/state", func(w http.ResponseWriter, r *http.Request) {
@@ -189,8 +210,15 @@ func startWebServer(addr string) {
 		writeJSON(w, http.StatusOK, resp)
 	})
 
+	return mux
+}
+
+// startWebServer starts the HTTP server on the given address.
+func startWebServer(addr string) {
+	gs := newGameState()
+
 	// Wrap with logging middleware
-	handler := loggingMiddleware(mux)
+	handler := loggingMiddleware(newServerMux(gs))
 
 	log.Printf("Starting web server on %s", addr)
 	if err := http.ListenAndServe(addr, handler); err != nil {

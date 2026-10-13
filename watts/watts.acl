@@ -1,0 +1,19 @@
+package "tic-tac-toe-eval" {
+  version     = "0.1.0"
+  description = "Iterative Go tic-tac-toe workflow evaluations"
+  var_files   = ["values.wvars"]
+  entrypoint  = module.coder.workflow.coding
+}
+
+variable "thinking" {
+  type        = string
+  description = "Reasoning setting passed to the coding Agents."
+}
+
+module "coder" {
+  source  = "../../watts/resources/examples/coder_golang"
+  version = "0.1.0"
+  variables = {
+    thinking = var.thinking
+  }
+}
