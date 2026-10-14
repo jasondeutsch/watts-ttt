@@ -10,6 +10,17 @@
 <div class="container">
   <h1>Tic-Tac-Toe</h1>
   <div id="status">Loading...</div>
+  <div id="mode-display">Mode: Two players</div>
+  <div class="mode-selector" id="mode-selector" role="radiogroup" aria-label="Game mode">
+    <label class="mode-option">
+      <input type="radio" name="mode" value="two-player" checked>
+      <span>Two players</span>
+    </label>
+    <label class="mode-option">
+      <input type="radio" name="mode" value="computer">
+      <span>Computer</span>
+    </label>
+  </div>
   <div class="board" id="board">
     <button class="cell" data-index="0"></button>
     <button class="cell" data-index="1"></button>
@@ -28,7 +39,11 @@
   const cells = document.querySelectorAll('.cell');
   const statusEl = document.getElementById('status');
   const resetBtn = document.getElementById('reset-btn');
+  const modeRadios = document.querySelectorAll('input[name="mode"]');
+  const modeDisplayEl = document.getElementById('mode-display');
   let currentGameOver = false;
+  let currentMode = 'two-player';
+  let moveInFlight = false;
 
   async function fetchState() {
     try {
@@ -59,6 +74,18 @@
 
     currentGameOver = state.gameOver;
 
+    // Sync the mode readout and selector with the server's active mode, so a
+    // page refresh restores the selected mode from GET /state (AC-7).
+    const activeMode = (state.mode === 'computer') ? 'computer' : 'two-player';
+    currentMode = activeMode;
+    modeDisplayEl.textContent = activeMode === 'computer' ? 'Mode: Computer' : 'Mode: Two players';
+    modeRadios.forEach(function(radio) {
+      const selected = (radio.value === activeMode);
+      radio.checked = selected;
+      const label = radio.closest('label');
+      if (label) label.classList.toggle('selected', selected);
+    });
+
     if (state.winner) {
       statusEl.textContent = 'Player ' + state.winner + ' wins!';
       statusEl.className = 'win';
@@ -72,7 +99,8 @@
   }
 
   async function makeMove(index) {
-    if (currentGameOver) return;
+    if (currentGameOver || moveInFlight) return;
+    moveInFlight = true;
     try {
       const res = await fetch(API_BASE + '/move', {
         method: 'POST',
@@ -92,6 +120,29 @@
     } catch (err) {
       statusEl.textContent = 'Network error.';
       statusEl.className = 'error';
+    } finally {
+      moveInFlight = false;
+    }
+  }
+
+  async function setMode(mode) {
+    if (moveInFlight) return;
+    if (mode === currentMode) return; // selecting the active mode: no effect
+    try {
+      const res = await fetch(API_BASE + '/mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: mode })
+      });
+      const state = await res.json();
+      renderBoard(state);
+      if (!res.ok && state.error) {
+        statusEl.textContent = state.error;
+        statusEl.className = 'error';
+      }
+    } catch (err) {
+      statusEl.textContent = 'Failed to change game mode.';
+      statusEl.className = 'error';
     }
   }
 
@@ -110,6 +161,12 @@
     cell.addEventListener('click', function() {
       var index = parseInt(cell.dataset.index);
       makeMove(index);
+    });
+  });
+
+  modeRadios.forEach(function(radio) {
+    radio.addEventListener('change', function() {
+      setMode(radio.value);
     });
   });
 

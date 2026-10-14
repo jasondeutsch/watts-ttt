@@ -10,10 +10,16 @@ variable "thinking" {
   description = "Reasoning setting passed to the coding Agents."
 }
 
+variable "image" {
+  type        = string
+  description = "OCI image containing the Go toolchain and Agent adapter."
+}
+
 module "coder" {
   source  = "../../watts/resources/examples/coder_golang"
   version = "0.1.0"
   variables = {
+    image    = var.image
     thinking = var.thinking
   }
 }

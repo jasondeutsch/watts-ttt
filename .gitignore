@@ -1,0 +1,4 @@
+
+# Watts private runtime and task state
+/.watts/
+**/.watts-state/

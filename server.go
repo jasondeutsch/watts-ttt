@@ -5,12 +5,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/rand"
 	"net/http"
 	"sync"
 )
 
 //go:embed index.html style.css
 var embeddedFiles embed.FS
+
+// Game modes. The browser offers exactly these two values.
+const (
+	modeTwoPlayer = "two-player"
+	modeComputer  = "computer"
+)
 
 // gameState holds the authoritative game state, protected by a mutex.
 type gameState struct {
@@ -19,6 +26,12 @@ type gameState struct {
 	currentPlayer rune
 	winner        rune
 	gameOver      bool
+	mode          string
+	// pickComputerMove selects the computer's O cell in computer mode. It is a
+	// test seam: production uses defaultPickComputerMove (uniform random via
+	// math/rand); tests may replace it with a deterministic selector to force
+	// particular outcomes through the same production handlers.
+	pickComputerMove func(b board) int
 }
 
 // stateResponse is the JSON response for game state.
@@ -27,6 +40,7 @@ type stateResponse struct {
 	CurrentPlayer string     `json:"currentPlayer"`
 	Winner        string     `json:"winner"`
 	GameOver      bool       `json:"gameOver"`
+	Mode          string     `json:"mode"`
 }
 
 // ErrorResponse is an error response body.
@@ -39,11 +53,31 @@ type moveRequest struct {
 	Cell *int `json:"cell"`
 }
 
-// newGameState creates a new game state with an empty board.
+// modeRequest is the JSON body for a mode change.
+type modeRequest struct {
+	Mode *string `json:"mode"`
+}
+
+// defaultPickComputerMove returns a uniformly random empty cell index using
+// math/rand from the Go standard library only (AC-8). It must only be called
+// when the board is not full.
+func defaultPickComputerMove(b board) int {
+	emptyCells := make([]int, 0, 9)
+	for i, c := range b {
+		if c == empty {
+			emptyCells = append(emptyCells, i)
+		}
+	}
+	return emptyCells[rand.Intn(len(emptyCells))]
+}
+
+// newGameState creates a new game state with an empty board in two-player mode.
 func newGameState() *gameState {
 	return &gameState{
-		board:         newBoard(),
-		currentPlayer: playerX,
+		board:            newBoard(),
+		currentPlayer:    playerX,
+		mode:             modeTwoPlayer,
+		pickComputerMove: defaultPickComputerMove,
 	}
 }
 
@@ -71,6 +105,7 @@ func (gs *gameState) toStateResponse() stateResponse {
 		CurrentPlayer: currentPlayer,
 		Winner:        winner,
 		GameOver:      gs.gameOver,
+		Mode:          gs.mode,
 	}
 }
 
@@ -183,6 +218,28 @@ func newServerMux(gs *gameState) *http.ServeMux {
 			return
 		}
 
+		if gs.mode == modeComputer {
+			// Exactly one automatic computer O move per valid nonterminal human
+			// move (AC-4). The human gave the game over at this point, so there is
+			// at least one empty cell. The human is always X and moves first, so
+			// currentPlayer stays X for the human's next turn.
+			compCell := gs.pickComputerMove(gs.board)
+			gs.board[compCell] = playerO
+			if winner, won := checkWin(gs.board); won {
+				gs.winner = winner
+				gs.gameOver = true
+				writeJSON(w, http.StatusOK, gs.toStateResponse())
+				return
+			}
+			if isDraw(gs.board) {
+				gs.gameOver = true
+				writeJSON(w, http.StatusOK, gs.toStateResponse())
+				return
+			}
+			writeJSON(w, http.StatusOK, gs.toStateResponse())
+			return
+		}
+
 		// Toggle player
 		if gs.currentPlayer == playerX {
 			gs.currentPlayer = playerO
@@ -190,6 +247,45 @@ func newServerMux(gs *gameState) *http.ServeMux {
 			gs.currentPlayer = playerX
 		}
 
+		writeJSON(w, http.StatusOK, gs.toStateResponse())
+	})
+
+	mux.HandleFunc("/mode", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, ErrorResponse{Error: "method not allowed"})
+			return
+		}
+
+		var req modeRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid mode"})
+			return
+		}
+		if req.Mode == nil {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid mode"})
+			return
+		}
+		mode := *req.Mode
+		if mode != modeTwoPlayer && mode != modeComputer {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid mode"})
+			return
+		}
+
+		gs.mu.Lock()
+		defer gs.mu.Unlock()
+
+		if mode == gs.mode {
+			// Selecting the mode that is already active has no effect.
+			writeJSON(w, http.StatusOK, gs.toStateResponse())
+			return
+		}
+
+		// Selecting a different mode starts a fresh game in that mode (AC-2).
+		gs.mode = mode
+		gs.board = newBoard()
+		gs.currentPlayer = playerX
+		gs.winner = 0
+		gs.gameOver = false
 		writeJSON(w, http.StatusOK, gs.toStateResponse())
 	})
 
@@ -207,6 +303,7 @@ func newServerMux(gs *gameState) *http.ServeMux {
 		resp := gs.toStateResponse()
 		gs.mu.Unlock()
 
+		// The active mode is preserved across reset (AC-3): gs.mode is untouched.
 		writeJSON(w, http.StatusOK, resp)
 	})
 
